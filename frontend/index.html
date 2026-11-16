@@ -6,33 +6,41 @@
 <title>日切放行</title>
 <script src="/static/vue.global.prod.js"></script>
 <style>
-  :root{--bg:#0b1220;--panel:#121a2b;--line:#243049;--text:#e8eefc;--muted:#93a0b8;--ok:#3ddc97;--bad:#ff6b6b;--accent:#4cc9f0}
+  :root{--bg:#0b1220;--panel:#121a2b;--line:#243049;--text:#e8eefc;--muted:#93a0b8;--ok:#3ddc97;--bad:#ff6b6b;--accent:#4cc9f0;--warn:#ffb454}
   *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
   .top{display:flex;align-items:center;gap:18px;padding:14px 20px;border-bottom:1px solid var(--line);background:#0e1626}
   .brand{font-weight:700;letter-spacing:.08em;font-size:18px}
   .brand small{display:block;color:var(--muted);font-weight:400;font-size:11px;letter-spacing:.02em;margin-top:2px}
-  .tabs{display:flex;gap:6px;flex:1}
+  .tabs{display:flex;gap:6px;flex:1;flex-wrap:wrap}
   .tabs button{background:transparent;border:1px solid transparent;color:var(--muted);padding:8px 12px;border-radius:999px;cursor:pointer}
   .tabs button.on{color:var(--text);border-color:var(--line);background:#18233a}
   .user{color:var(--muted);font-size:13px}
   .ghost{background:#18233a;border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:8px;cursor:pointer}
   main{padding:18px 20px 28px}
   .grid{display:grid;grid-template-columns:1.2fr .8fr;gap:14px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;align-items:start}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
   h2{margin:0 0 10px;font-size:15px;color:#c9d4ea}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+  th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
   th{color:var(--muted);font-weight:600}
   input,select{width:100%;background:#0b1220;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;margin:4px 0 10px}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
   .primary{background:var(--accent);color:#041018;border:0;padding:9px 12px;border-radius:8px;font-weight:700;cursor:pointer}
+  .danger{background:var(--bad);color:#1a0507;border:0;padding:9px 12px;border-radius:8px;font-weight:700;cursor:pointer}
   .mono{font-family:Consolas,"Courier New",monospace}
   .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#1b2a22;color:var(--ok)}
   .tag.bad{background:#2a1518;color:var(--bad)}
+  .tag.warn{background:#2d2415;color:var(--warn)}
+  .tag.muted{background:#18233a;color:var(--muted)}
   .login{max-width:400px;margin:12vh auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
-  .err{color:var(--bad);min-height:18px;font-size:13px}
+  .err{color:var(--bad);min-height:18px;font-size:13px;white-space:pre-wrap}
+  .okmsg{color:var(--ok);min-height:18px;font-size:13px;white-space:pre-wrap}
   .kpi{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
   .kpi .panel{padding:12px}.kpi b{display:block;font-size:22px;margin-top:4px}
+  .hint{color:var(--muted);font-size:12px;line-height:1.6;margin:6px 0 10px}
+  .locked{border:1px solid var(--warn);background:#2d2415;border-radius:10px;padding:10px;margin-bottom:10px;font-size:13px}
+  code{background:#0b1220;border:1px solid var(--line);border-radius:6px;padding:1px 6px}
 </style>
 </head>
 <body>
@@ -54,11 +62,14 @@ createApp({
   setup(){
     const token=ref(localStorage.getItem('slicegate_token')||'');
     const user=ref(localStorage.getItem('slicegate_user')||'');
-    const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
-    const slices=ref([]), releases=ref([]), watermarks=ref([]);
+    const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref(''), actionOk=ref('');
+    const slices=ref([]), releases=ref([]), watermarks=ref([]), wmCurrent=ref([]), rollbacks=ref([]);
+    const policyItems=ref([]), policyToday=ref(null);
     const form=ref({slice_no:'SL-2026-11-03-east',biz_date:'2026-11-03',partition_key:'east',row_count:1000,expected_count:1000});
     const releaseSliceId=ref(1), consumer=ref('ads_order');
-    const nav=['切片登记','完整度裁决','下游放行','消费水位'];
+    const policyForm=ref({caliber:'软回拨',reason:''});
+    const rbForm=ref({consumer:'ads_order',target_biz_date:'2026-11-01',note:''});
+    const nav=['切片登记','完整度裁决','下游放行','消费水位','水位回拨'];
     const completeCnt=computed(()=>slices.value.filter(s=>s.completeness==='完整').length);
     const openCnt=computed(()=>slices.value.filter(s=>s.release_status!=='已放行').length);
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
@@ -79,19 +90,65 @@ createApp({
     }
     async function refresh(){
       if(!token.value) return;
+      actionErr.value='';
       const s=await loadJson('/api/slices'); if(s===null) return;
       slices.value=Array.isArray(s.items)?s.items:[];
       const rel=await loadJson('/api/releases'); if(rel===null) return;
       releases.value=Array.isArray(rel.items)?rel.items:[];
       const w=await loadJson('/api/watermarks'); if(w===null) return;
       watermarks.value=Array.isArray(w.items)?w.items:[];
+      wmCurrent.value=Array.isArray(w.current)?w.current:[];
+      const p=await loadJson('/api/rollback/policy'); if(p===null) return;
+      policyItems.value=Array.isArray(p.items)?p.items:[];
+      policyToday.value=p.today||null;
+      const rb=await loadJson('/api/rollback'); if(rb===null) return;
+      rollbacks.value=Array.isArray(rb.items)?rb.items:[];
       if(slices.value.length) releaseSliceId.value=slices.value[0].id;
     }
     async function createSlice(){actionErr.value='';const r=await fetch('/api/slices',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'失败';await refresh();}
     async function evaluate(id){await fetch('/api/slices/'+id+'/evaluate',{method:'POST',headers:auth()});await refresh();}
     async function doRelease(){actionErr.value='';const r=await fetch('/api/slices/'+releaseSliceId.value+'/release',{method:'POST',headers:auth(),body:JSON.stringify({consumer:consumer.value})});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'放行失败';await refresh();}
+    async function lockPolicy(){
+      actionErr.value='';actionOk.value='';
+      const r=await fetch('/api/rollback/policy',{method:'POST',headers:auth(),body:JSON.stringify(policyForm.value)});
+      const j=await r.json();
+      if(!r.ok){actionErr.value=j.detail||'口径锁定失败';} else {actionOk.value='今日口径已锁定：'+j.caliber+'（当日禁止改口）';}
+      await refresh();
+    }
+    async function doRollback(){
+      actionErr.value='';actionOk.value='';
+      if(!policyToday.value){actionErr.value='回拨口径偏了：请先在下方回拨规则簿择定今日口径';return;}
+      const r=await fetch('/api/rollback',{method:'POST',headers:auth(),body:JSON.stringify(rbForm.value)});
+      const j=await r.json();
+      if(!r.ok){actionErr.value=j.detail||'回拨失败';}
+      else{actionOk.value='回拨成功 '+j.rollback_no+'｜'+j.caliber+'｜影响放行 '+j.affected_releases+' 笔、水位 '+j.affected_watermarks+' 条、切片 '+(j.affected_slices||[]).join(', ');}
+      await refresh();
+    }
+    function lifeTag(life){
+      if(life==='有效') return '<span class="tag">有效</span>';
+      if(life==='已回拨(软)') return '<span class="tag warn">已回拨·只读史</span>';
+      if(life==='硬作废') return '<span class="tag bad">硬作废</span>';
+      return '<span class="tag muted">'+life+'</span>';
+    }
+    function wmTag(w){
+      if(w.status==='有效') return w.is_current?'<span class="tag">有效·当前</span>':'<span class="tag muted">有效·历史</span>';
+      if(w.status==='已回拨(软)') return '<span class="tag warn">已回拨(软)</span>';
+      return '<span class="tag bad">已撤回(硬)</span>';
+    }
+    function sliceTag(s){
+      if(s.release_status==='已放行') return '<span class="tag">已放行</span>';
+      if(s.release_status==='可复检未放行') return '<span class="tag warn">可复检未放行</span>';
+      if(s.release_status==='硬作废-须新切片') return '<span class="tag bad">硬作废·须新切片</span>';
+      return '<span class="tag muted">'+s.release_status+'</span>';
+    }
+    function rbTag(r){
+      if(r.result==='成功') return '<span class="tag">成功</span>';
+      return '<span class="tag bad">'+r.result+'</span>';
+    }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,form,releaseSliceId,consumer,actionErr,completeCnt,openCnt,login,logout,createSlice,evaluate,doRelease};
+    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,wmCurrent,rollbacks,policyItems,policyToday,
+      form,releaseSliceId,consumer,policyForm,rbForm,actionErr,actionOk,completeCnt,openCnt,
+      login,logout,createSlice,evaluate,doRelease,lockPolicy,doRollback,lifeTag,wmTag,sliceTag,rbTag};
   },
   template:`
   <div v-if="!token" class="login">
@@ -101,7 +158,7 @@ createApp({
   </div>
   <div v-if="token">
     <div class="top">
-      <div class="brand">日切放行<small>切片 → 完整度 → 放行 → 水位</small></div>
+      <div class="brand">日切放行<small>切片 → 完整度 → 放行 → 水位 → 回拨</small></div>
       <div class="tabs"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="tab=i">{{n}}</button></div>
       <div class="user">{{user}}</div><button class="ghost" @click="logout">退出</button>
     </div>
@@ -109,16 +166,17 @@ createApp({
       <div class="kpi">
         <div class="panel">切片总数<b class="mono">{{slices.length}}</b></div>
         <div class="panel">已完整<b class="mono">{{completeCnt}}</b></div>
-        <div class="panel">未放行<b class="mono">{{openCnt}}</b></div>
+        <div class="panel">未放行/待处置<b class="mono">{{openCnt}}</b></div>
       </div>
       <div v-show="tab===0" class="grid">
         <div class="panel">
-          <h2>在途切片</h2>
-          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th></th></tr></thead>
+          <h2>在途切片（同库切片清单）</h2>
+          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th>放行态</th><th></th></tr></thead>
           <tbody><tr v-for="s in slices" :key="s.id">
             <td class="mono">{{s.slice_no}}</td><td>{{s.biz_date}} / {{s.partition_key}}</td>
             <td class="mono">{{s.row_count}}/{{s.expected_count}}</td>
             <td><span class="tag" :class="{bad:s.completeness!=='完整'}">{{s.completeness}}</span></td>
+            <td v-html="sliceTag(s)"></td>
             <td><button class="ghost" @click="evaluate(s.id)">重裁</button></td>
           </tr></tbody></table>
         </div>
@@ -136,27 +194,87 @@ createApp({
         <table><thead><tr><th>切片</th><th>缺口</th><th>结论</th><th>放行态</th></tr></thead>
         <tbody><tr v-for="s in slices" :key="'c'+s.id">
           <td class="mono">{{s.slice_no}}</td><td class="mono">{{Math.max(s.expected_count-s.row_count,0)}}</td>
-          <td>{{s.completeness}}</td><td>{{s.release_status}}</td>
+          <td>{{s.completeness}}</td><td v-html="sliceTag(s)"></td>
         </tr></tbody></table>
       </div>
       <div v-show="tab===2" class="grid">
         <div class="panel">
           <h2>申请放行</h2>
-          <label>切片</label><select v-model.number="releaseSliceId"><option v-for="s in slices" :value="s.id">{{s.slice_no}}（{{s.completeness}}）</option></select>
+          <label>切片</label><select v-model.number="releaseSliceId"><option v-for="s in slices" :value="s.id">{{s.slice_no}}（{{s.completeness}} / {{s.release_status}}）</option></select>
           <label>下游</label><input v-model="consumer"/>
           <button class="primary" @click="doRelease">放行</button>
           <div class="err">{{actionErr}}</div>
         </div>
         <div class="panel">
-          <h2>放行流水</h2>
-          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>时间</th></tr></thead>
-          <tbody><tr v-for="r in releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td><td>{{r.status}}</td><td class="mono">{{r.created_at}}</td></tr></tbody></table>
+          <h2>放行流水（成功流水回拨后保留只读史/作废标注）</h2>
+          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>生命周期</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="r in releases" :key="r.id">
+            <td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td><td>{{r.status}}</td>
+            <td v-html="lifeTag(r.lifecycle)"></td><td class="mono">{{r.created_at}}</td>
+          </tr></tbody></table>
         </div>
       </div>
-      <div v-show="tab===3" class="panel">
-        <h2>消费水位</h2>
-        <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th></tr></thead>
-        <tbody><tr v-for="w in watermarks" :key="w.id"><td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td><td class="mono">{{w.source_slice}}</td></tr></tbody></table>
+      <div v-show="tab===3" class="grid">
+        <div class="panel">
+          <h2>水位侧栏（各消费方当前有效水位）</h2>
+          <table><thead><tr><th>消费方</th><th>当前水位业务日</th></tr></thead>
+          <tbody><tr v-for="w in wmCurrent" :key="'cur'+w.consumer"><td class="mono">{{w.consumer}}</td><td class="mono">{{w.biz_date}}</td></tr>
+            <tr v-if="!wmCurrent.length"><td colspan="2" class="hint">暂无有效水位（可能已全部回拨）</td></tr>
+          </tbody></table>
+        </div>
+        <div class="panel">
+          <h2>水位明细（含回拨/撤回留痕，同库可核）</h2>
+          <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th><th>状态</th></tr></thead>
+          <tbody><tr v-for="w in watermarks" :key="w.id">
+            <td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td>
+            <td class="mono">{{w.source_slice}}</td><td v-html="wmTag(w)"></td>
+          </tr></tbody></table>
+        </div>
+      </div>
+      <div v-show="tab===4">
+        <div class="grid3">
+          <div class="panel">
+            <h2>回拨规则簿（口径互斥·当日锁定禁改口）</h2>
+            <div v-if="policyToday" class="locked">
+              今日已锁定口径：<b>{{policyToday.caliber}}</b><br/>
+              锁定人：{{policyToday.locked_by}} ｜ {{policyToday.locked_at}}<br/>
+              说明：{{policyToday.reason||'—'}}
+            </div>
+            <div v-else class="hint">今日尚未择定口径。甲乙互斥须择一，锁定后当日禁止改口。</div>
+            <label>口径</label>
+            <select v-model="policyForm.caliber" :disabled="!!policyToday">
+              <option value="软回拨">甲 · 软回拨（水位退到指定业务日；切片改回可复检未放行；成功流水保留只读史并标注已回拨）</option>
+              <option value="硬回拨作废">乙 · 硬回拨作废（水位撤回并作废成功放行；同切片号禁止再放行，须新切片重走完整度）</option>
+            </select>
+            <label>口径说明（留痕）</label><input v-model="policyForm.reason" :disabled="!!policyToday" placeholder="例：下游反馈 11-01 数据口径错误"/>
+            <button class="primary" @click="lockPolicy" :disabled="!!policyToday">锁定今日口径</button>
+            <h2 style="margin-top:16px">历史规则簿</h2>
+            <table><thead><tr><th>日</th><th>口径</th><th>锁定人</th></tr></thead>
+            <tbody><tr v-for="p in policyItems" :key="p.biz_date"><td class="mono">{{p.biz_date}}</td><td>{{p.caliber}}</td><td>{{p.locked_by}}</td></tr></tbody></table>
+          </div>
+          <div class="panel">
+            <h2>回拨处置画面</h2>
+            <div class="hint">
+              回拨与放行态、成功流水、水位在同一事务同成同败。<br/>
+              同一消费方两名值班并发回拨时加锁串行，后手按「回拨争用禁默许」拒绝并留痕。
+            </div>
+            <label>消费方</label><input v-model="rbForm.consumer"/>
+            <label>退到的目标业务日（该日及之后的有效成功放行/水位纳入回拨）</label><input v-model="rbForm.target_biz_date" placeholder="YYYY-MM-DD"/>
+            <label>备注</label><input v-model="rbForm.note"/>
+            <button class="danger" @click="doRollback">执行回拨（{{policyToday ? policyToday.caliber : '口径未锁'}}）</button>
+            <div class="okmsg">{{actionOk}}</div>
+            <div class="err">{{actionErr}}</div>
+          </div>
+          <div class="panel">
+            <h2>回拨目录/账本（同库可核，偏口径与争用亦留痕）</h2>
+            <table><thead><tr><th>回拨单号</th><th>消费方</th><th>目标日</th><th>口径</th><th>结果</th><th>原因</th></tr></thead>
+            <tbody><tr v-for="r in rollbacks" :key="r.id">
+              <td class="mono">{{r.rollback_no}}</td><td>{{r.consumer}}</td><td class="mono">{{r.target_biz_date}}</td>
+              <td>{{r.caliber}}</td><td v-html="rbTag(r)"></td><td style="max-width:260px">{{r.reason}}</td>
+            </tr>
+            <tr v-if="!rollbacks.length"><td colspan="6" class="hint">暂无回拨记录</td></tr></tbody></table>
+          </div>
+        </div>
       </div>
     </main>
   </div>`
